@@ -247,7 +247,7 @@ Definition pancake_peg_def[nocompute]:
         (INL Store32NT, seql [consume_kw St32K; mknt ExpNT;
                                 consume_tok CommaT; mknt ExpNT]
                                (mksubtree Store32NT));
-        (INL CaseNT, seql [consume_kw CaseK; keep_ident; consume_tok LCurT;
+        (INL CaseNT, seql [consume_kw CaseK; keep_ident; consume_tok LParT;keep_ident; consume_tok RParT; consume_tok LCurT;
                   try_ProgNT] (mksubtree CaseNT));
         (INL CaseListNT, seql [mknt CaseNT; rpt (seql[(mknt CaseNT)] I) FLAT ] (mksubtree CaseListNT));
         (INL MatchNT, seql [consume_kw MatchK;

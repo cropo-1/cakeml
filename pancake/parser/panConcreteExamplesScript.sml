@@ -763,10 +763,10 @@ val match =
   fun main() {
     var example_union my_union = example_union < variant_1 = <1,2> >;
     match (my_union) {
-      case variant_1 {
+      case variant_1 (v) {
         return my_union.2;
       }
-      case variant_2 {
+      case variant_2 (v) {
         return my_union.1;
       }
       default {

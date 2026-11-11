@@ -29,12 +29,20 @@ Type eid     = ``:mlstring``
 
 Type decname = ``:mlstring``
 
+Type uname = ``:mlstring``
+
+Type vname = ``:mlstring``
+
+Type tag = ``:mlstring``
+
 Type index = ``:num``
 
 Datatype:
   shape = One
         | Comb (shape list)
         | Named stcname
+        | Union uname
+        | Variant vname (*Not sure if this will ever happen*)
 End
 
 Datatype:
@@ -52,6 +60,7 @@ Datatype:
       | RField index exp
       | NStruct stcname ((fldname # exp) list)
       | NField fldname exp
+      | VariantE uname (fldname # exp) (* tag *)
       | Load shape exp (* exp: start addr of value with given shape *)
       | Load32 exp
       | LoadByte exp
@@ -85,6 +94,10 @@ Datatype:
        | If    exp prog prog
        | While exp prog
        | Break
+       | Match exp prog prog
+       | Case fldname varname prog
+       | CaseList (prog list)
+       | Default prog
        | Continue
        | Call (((varkind # varname) option # ((eid # varname # prog) option)) option) funname (exp list)
        | DecCall varname shape funname (exp list) prog
@@ -114,6 +127,7 @@ Datatype:
        | Decl shape mlstring exp
        | ExnDecl eid shape
        | Name stcname ((fldname # shape) list)
+       | UnionD uname ((vname # shape) list)
 End
 
 Datatype:
@@ -123,6 +137,26 @@ Datatype:
   |>
 End
 
+Datatype:
+  union_info =
+    <| variants : (varname # shape) list
+    ;  size : num
+    |>
+End
+
+Datatype:
+  named_info = Struct_info struct_info
+  | Union_info union_info
+End
+
+Datatype:
+  variant_info =
+    <| union: uname
+      ; tag: varname
+      ; variant: shape
+    |>
+End
+
 Overload TailCall = “Call NONE”
 Overload AssignCall = “\s h. Call (SOME (SOME s , h))”
 Overload StandAloneCall = “\h. Call (SOME (NONE , h))”
@@ -130,10 +164,14 @@ Overload StandAloneCall = “\h. Call (SOME (NONE , h))”
 Definition is_wf_shape_def:
   is_wf_shape ctxt One = T /\
   is_wf_shape ctxt (Comb shs) = EVERY (is_wf_shape ctxt) shs /\
-  is_wf_shape ctxt (Named nm) =
+  (is_wf_shape ctxt (Named nm) =
     case ALOOKUP ctxt nm of
     | SOME flds => T
-    | NONE => F
+    | NONE => F) /\
+  is_wf_shape ctxt (Union nm) =
+    (case ALOOKUP ctxt nm of
+    | SOME flds => T
+    | NONE => F)
 End
 
 Definition is_wf_flds_def:
@@ -155,10 +193,23 @@ End
 Definition size_of_sh_with_ctxt_def:
   size_of_sh_with_ctxt ctxt One = 1 /\
   size_of_sh_with_ctxt ctxt (Comb shapes) = SUM (MAP (size_of_sh_with_ctxt ctxt) shapes) /\
-  size_of_sh_with_ctxt ctxt (Named name) =
+  (size_of_sh_with_ctxt ctxt (Named name) =
     case ALOOKUP ctxt name of
-    | SOME info => info.size
+    | SOME (Struct_info info) => info.size
+    | SOME (Union_info info) => info.size
+    | NONE => 1 (* should not happen *) )
+  (* size_of_sh_with_ctxt ctxt (Variant name) =
+    case ALOOKUP ctxt name of
+    | SOME info => info.size (* tag + max size, defined in union_info *) (*IS THIS RELEVANT*)
     | NONE => 1 (* should not happen *)
+  size_of_sh_with_ctxt ctxt (Union name) =
+    case ALOOKUP ctxt name of
+    | SOME info => info.size (* tag + max size, defined in union_info *)
+    | NONE => 1 (* should not happen *) *)
+End
+
+Definition size_of_union_with_ctxt_def:
+  size_of_union_with_ctxt ctxt (Comb shapes) = MAX_LIST (MAP (size_of_sh_with_ctxt ctxt) shapes)
 End
 
 (* For passes after Nameds are compiled away eg pan_to_crep *)
@@ -197,6 +248,7 @@ Definition with_shape_def:
      TAKE (size_of_shape sh) e :: with_shape shs (DROP (size_of_shape sh) e))
 End
 
+(*TODO deal with this for match*)
 Definition exp_ids_def:
   (exp_ids Skip = ([]:mlstring list)) ∧
   (exp_ids (Raise e _) = [e]) ∧
@@ -235,6 +287,7 @@ Definition var_exp_def:
   (var_exp (RStruct es) = FLAT (MAP var_exp es)) ∧
   (var_exp (RField i e) = var_exp e) ∧
   (var_exp (NStruct sn fes) = FLAT (MAP var_exp (MAP SND fes))) ∧
+  (var_exp (VariantE un fes) = (var_exp (SND fes))) ∧
   (var_exp (NField fld e) = var_exp e) ∧
   (var_exp (Load sh e) = var_exp e) ∧
   (var_exp (Load32 e) = var_exp e) ∧
@@ -260,6 +313,7 @@ Definition global_var_exp_def:
   (global_var_exp (RStruct es) = FLAT (MAP global_var_exp es)) ∧
   (global_var_exp (RField i e) = global_var_exp e) ∧
   (global_var_exp (NStruct sn fes) = FLAT (MAP (global_var_exp o SND) fes)) ∧
+  (global_var_exp (VariantE un fes) = (global_var_exp (SND fes))) ∧
   (global_var_exp (NField fld e) = global_var_exp e) ∧
   (global_var_exp (Load sh e) = global_var_exp e) ∧
   (global_var_exp (LoadByte e) = global_var_exp e) ∧
@@ -296,7 +350,8 @@ Definition functions_def:
   (fi.name,fi.params,fi.body,fi.return)::functions fs ∧
   functions(Decl _ _ _::fs) = functions fs ∧
   functions (ExnDecl _ _ :: fs) = functions fs ∧
-  functions(Name _ _::fs) = functions fs
+  functions(Name _ _::fs) = functions fs ∧
+  functions(UnionD _ _::fs) = functions fs
 End
 
 Definition exceptions_def:
@@ -307,6 +362,7 @@ Definition exceptions_def:
   exceptions(Name _ _::fs) = exceptions fs
 End
 
+(*TODO add match to this *)
 Definition fun_ids_def:
   (fun_ids (Dec _ _ _ p) = fun_ids p) ∧
   (fun_ids (Seq p q) = fun_ids p ++ fun_ids q) ∧
@@ -318,6 +374,7 @@ Definition fun_ids_def:
   (fun_ids _ = [])
 End
 
+(*TODO add match to this *)
 Definition free_var_ids_def:
   (free_var_ids (Dec vn sh e p) = var_exp e ++ FILTER ($≠ vn) (free_var_ids p)) ∧
   (free_var_ids (Seq p q) = free_var_ids p ++ free_var_ids q) ∧

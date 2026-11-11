@@ -35,7 +35,6 @@ End
 Overload "'"[local] = ``λf a. OPTION_BIND a f``
 
 Overload ptree_size[local] = ``parsetree_size (K 0) (K 0) (K 0)``;
-Overload ptree1_size[local] = ``parsetree1_size (K 0) (K 0) (K 0)``;
 
 Definition tokcheck_def:
   tokcheck pt expected =
@@ -84,7 +83,7 @@ Definition conv_nat_def:
 End
 
 Definition conv_const_def:
-  conv_const t = lift (panLang$Const o i2w) $ conv_int t
+  conv_const t = lift (panLang$Const) $ conv_int t
 End
 
 Definition conv_ident_def:
@@ -288,15 +287,8 @@ Definition conv_Exp_def:
     else if isNT nodeNT ENotNT then
       case args of
         [t] => conv_Exp t
-      | [_; t] => lift (Cmp Equal (Const 0w)) (conv_Exp t)
+      | [_; t] => lift (Cmp Equal (Const 0)) (conv_Exp t)
       | _ => NONE
-    (* else if isNT nodeNT VariantNT then
-      case args of
-        [t1;t2] => do nm <- conv_ident t1;
-                      fld <- conv_Field t2;
-                      SOME $ VariantE nm fld
-                    od
-      | _ => NONE *)
     else if isNT nodeNT ELoadByteNT then
       case args of
         [t] => lift LoadByte (conv_Exp t)
@@ -326,14 +318,14 @@ Definition conv_Exp_def:
       case args of
         [e] => conv_Exp e
       | e1::args' => do es  <- OPT_MMAP conv_Exp $ e1::args';
-                        SOME $ Cmp NotEqual (Const 0w) $ Op Or es
+                        SOME $ Cmp NotEqual (Const 0) $ Op Or es
                      od
       | _ => NONE
     else if isNT nodeNT EBoolAndNT then
       case args of
         [e] => conv_Exp e
       | e1::args' => do es  <- OPT_MMAP conv_Exp $ e1::args';
-                        SOME $ Op And $ MAP (λe. Cmp NotEqual (Const 0w) e) es
+                        SOME $ Op And $ MAP (λe. Cmp NotEqual (Const 0) e) es
                      od
       | _ => NONE
     else if isNT nodeNT EShiftNT then
@@ -352,8 +344,8 @@ Definition conv_Exp_def:
   (conv_Exp leaf = if tokcheck leaf (kw BaseK) then SOME BaseAddr
                    else if tokcheck leaf (kw TopK) then SOME TopAddr
                    else if tokcheck leaf (kw BiwK) then SOME BytesInWord
-                   else if tokcheck leaf (kw TrueK) then SOME $ Const 1w
-                   else if tokcheck leaf (kw FalseK) then SOME $ Const 0w
+                   else if tokcheck leaf (kw TrueK) then SOME $ Const 1
+                   else if tokcheck leaf (kw FalseK) then SOME $ Const 0
                    else conv_const leaf ++ conv_var leaf) ∧
   conv_binaryExps [] e = SOME e ∧
   (conv_binaryExps (t1::t2::ts) res =
@@ -613,7 +605,7 @@ Definition conv_DecCall_def:
             i' <- conv_ident i;
             e' <- conv_ident e;
             args' <- (case ts of [] => SOME [] | args::_ => conv_ArgList args);
-            SOME (s',i',e',args': 'a exp list)
+            SOME (s',i',e',args': exp list)
          od
      | _ => NONE
    else
@@ -662,9 +654,10 @@ Definition conv_Prog_def:
        | _ => NONE
      else if isNT nodeNT CaseNT then
       case args of
-        [i; p] => do i' <- conv_ident i;
+        [i; v; p] => do i' <- conv_ident i;
+                     v' <- conv_ident v;
                      p' <- conv_Prog p;
-                     SOME (add_locs_annot nd (Case i' p'))
+                     SOME (add_locs_annot nd (Case i' v' p'))
                   od
         |_ => NONE
       else if isNT nodeNT CaseListNT then
@@ -905,8 +898,8 @@ Definition localise_prog_def:
   localise_prog ls (Default prog) =
   Default (localise_prog ls prog) ∧
   (* TODO check this one *)
-  localise_prog ls (Case fldname prog) =
-  Case fldname (localise_prog ls prog) ∧
+  localise_prog ls (Case fldname varname prog) =
+  Case fldname varname (localise_prog ls prog) ∧
   localise_prog ls (Dec varname shape exp prog) =
   Dec varname shape
       (localise_exp ls exp)
@@ -1012,8 +1005,8 @@ Definition identify_variants_prog_def:
     (identify_variants_prog ls prog2) ∧
   identify_variants_prog ls (CaseList progs) =
   CaseList (MAP (\prog. identify_variants_prog ls prog) progs) ∧
-  identify_variants_prog ls (Case fldname prog) =
-  Case fldname (identify_variants_prog ls prog) ∧
+  identify_variants_prog ls (Case fldname varname prog) =
+  Case fldname varname (identify_variants_prog ls prog) ∧
   identify_variants_prog ls (Default prog) =
   Default (identify_variants_prog ls prog) ∧
   identify_variants_prog ls (Dec varname shape exp prog) =
@@ -1103,16 +1096,3 @@ Definition parse_topdecs_to_ast_def:
            | INR err => INR err)
      | INR err => INR err)
 End
-
-(* Definition parse_topdecs_to_ast_def:
-  parse_topdecs_to_ast s =
-    (case safe_pancake_lex s of
-     | INL toks =>
-        (case parse toks of
-           | INL e =>
-             (case conv_TopDecList e of
-              | SOME funs => INL(localise_topdecs funs)
-              | NONE => INR [(«Parse tree conversion failed»,unknown_loc)])
-           | INR err => INR err)
-     | INR err => INR err)
-End *)
