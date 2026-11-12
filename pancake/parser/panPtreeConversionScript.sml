@@ -665,7 +665,7 @@ Definition conv_Prog_def:
           (a::as) => do ps <- (OPT_MMAP conv_Prog) (a::as);
                         SOME (add_locs_annot nd (CaseList ps))
                      od
-          | [] => SOME (add_locs_annot nd (CaseList []))
+          | [] => SOME (Skip)
           | _ => NONE
      else if isNT nodeNT MatchNT then
         case args of
@@ -899,7 +899,7 @@ Definition localise_prog_def:
   Default (localise_prog ls prog) ∧
   (* TODO check this one *)
   localise_prog ls (Case fldname varname prog) =
-  Case fldname varname (localise_prog ls prog) ∧
+  Case fldname varname (localise_prog (insert ls varname ()) prog) ∧
   localise_prog ls (Dec varname shape exp prog) =
   Dec varname shape
       (localise_exp ls exp)

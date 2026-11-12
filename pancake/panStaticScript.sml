@@ -177,9 +177,10 @@ Datatype:
   ; globals      : (varname , global_info) map  (* declared globals *)
   ; funcs        : (funname , func_info  ) map  (* all function info *)
   ; exns         : (eid     , except_info) map  (* all exception decl info *)
-  ; structs      : (stcname # struct_info) list (* struct name context *)
+  ; structs      : (stcname # named_info) list (* struct name context *)
   ; scope        : scope                        (* current scope info *)
   ; in_loop      : bool                         (* loop status *)
+  ; match_exp    : (bool # uname)               (* is in match body, and the union being unpacked *)
   ; is_reachable : reachable                    (* reachability *)
   ; last         : last_stmt                    (* exit-ness of last statement *)
   ; loc          : mlstring                     (* location string *)
@@ -212,6 +213,12 @@ Datatype:
   |>
 End
 
+Datatype:
+  cases_return = <|
+    prog_rets : prog_return list (* shaped basedness of exps *)
+  |>
+End
+
 (* Varieties of identifiers that can be out of scope *)
 Datatype:
   scoped_id = Var | Fun | Stc | Exn
@@ -232,11 +239,21 @@ Definition sh_bd_from_sh_def:
     | NONE => NONE) /\
   sh_bd_from_sh sctxt b (Named nm) =
     (case dropWhile (\(n,i). ~(n = nm)) sctxt of
-    | (nm,info)::sctxt' =>
+    | (nm, Struct_info info)::sctxt' =>
       let (field_nms, field_shs) = UNZIP info.fields in
       (case OPT_MMAP (sh_bd_from_sh sctxt' b) field_shs of
       | SOME field_sbs => SOME $ NamedB nm $ ZIP (field_nms, field_sbs)
       | NONE => NONE)
+    | (nm, Union_info info)::sctxt' =>
+      let (var_names, var_shs) = UNZIP info.variants in
+      (case OPT_MMAP (sh_bd_from_sh sctxt' b) var_shs of
+      | SOME var_sbs => SOME $ NamedB nm $ ZIP (var_names, var_sbs)
+      | NONE => NONE)
+    (* | (nm, Union_inf info)::sctxt' =>
+      let (var_name, var_sh) = info.field in
+      (case sh_bd_from_sh sctxt' b fields_shs of
+      | SOME var_sb => SOME $ NamedB nm $ (var_name, var_sh)
+      | NONE => NONE) *)
     | _ => NONE)
 Termination
   wf_rel_tac `measure LENGTH LEX measure (shape_size o SND)`
@@ -745,6 +762,38 @@ Definition check_func_args_def:
     | ([], []) => return ()
 End
 
+Definition check_variant_def:
+  check_variant ctxt uname variants (vname, sb) =
+    (* check that variant is just one field *)
+    (* look through find matching fldname *)
+    (* variant will only ever have one field *)
+    do
+      sh <-
+        (case FILTER (\(vname', sh). vname' = vname) variants of
+        [(vname, sh)] => return sh
+        |[] => error (ShapeErr $ concat [
+            ctxt.loc; strlit "undeclared variant "; vname;
+            strlit " in union "; uname;
+            strlit " constant in ";
+            get_scope_desc ctxt.scope; strlit "\n" ])
+        | _ => error (ShapeErr $ concat [
+                ctxt.loc; strlit "wow "; vname; strlit "\n" ])); (* TODO how does this happen??? *)
+        if ~(sh_bd_has_shape sh sb) then
+          error (ShapeErr $ get_shape_mismatch_msg (concat [
+              strlit "value for variant "; vname;
+              strlit " given to union "; uname; strlit "\n"
+            ]) (sh_bd_to_str sb) (shape_to_str sh) ctxt.loc ctxt.scope)
+        else return ()
+  od
+    (* return(); *)
+End
+
+Definition get_arm_names_def:
+  get_arm_names [] = [] /\
+  get_arm_names (Seq (Annot _ _) (Case name _ _) :: progs) = name :: (get_arm_names progs) /\
+  get_arm_names (_ :: progs) = get_arm_names progs
+End
+
 (* Check all fields are given exactly one value and shape *)
 Definition check_struct_fields_def:
   check_struct_fields ctxt sname fields fsbs =
@@ -882,8 +931,8 @@ Definition static_check_exp_def:
       (* check struct name declared *)
       sinfo <-
         case ALOOKUP ctxt.structs name of
-        | SOME info => return info
-        | NONE => error (ScopeErr $ get_scope_msg Stc ctxt.loc name ctxt.scope);
+        | SOME (Struct_info info) => return info
+        | _ => error (ScopeErr $ get_scope_msg Stc ctxt.loc name ctxt.scope);
       (* check struct field exps *)
       (field_names, field_exps) <<- UNZIP eflds;
       esret <- static_check_exps ctxt field_exps;
@@ -903,6 +952,21 @@ Definition static_check_exp_def:
           get_scope_desc ctxt.scope; strlit "\n"])
       (* return exp info with found shape *)
       | SOME sb => return <| sh_bd := sb |>
+    od ∧
+  static_check_exp ctxt (VariantE name fld) =
+    do
+      vinfo <-
+        (case ALOOKUP ctxt.structs name of
+        | SOME (Union_info inf) => return inf
+        (* TODO clean up of handling this error *)
+        | _ => error (ScopeErr $ get_scope_msg Stc ctxt.loc name ctxt.scope)); (* Happens if variant has more than one field *)
+        (* | NONE => error (ScopeErr $ get_scope_msg Stc ctxt.loc name ctxt.scope) *)
+      (* check variant *)
+      (field_name, field_exp) <<- fld;
+      eret <- static_check_exp ctxt field_exp;
+      field_sb <<- [(field_name, eret.sh_bd)];
+      check_variant ctxt name vinfo.variants (field_name, eret.sh_bd);
+      return <| sh_bd := NamedB name field_sb |>
     od ∧
   static_check_exp ctxt (Load shape addr) =
     do
@@ -1073,7 +1137,6 @@ Termination
   first_x_assum $ qspec_then `name` assume_tac >>
   intLib.COOPER_TAC
 End
-
 (*
   static_check_prog returns:
     (prog info (:prog_return)) static_result
@@ -1547,6 +1610,111 @@ Definition static_check_prog_def:
         ; curr_loc   := pret2.curr_loc
         ; recurse    := (pret1.recurse \/ pret2.recurse) |>
     od ∧
+  static_check_prog ctxt (Match exp prog1 prog2) =
+  (* Match exp caseList Default *)
+    do
+      eret <- static_check_exp ctxt exp;
+      vname <-
+        (case exp of
+          (Var _ vname ) => return vname
+          | _ => error (ShapeErr $ get_non_word_msg
+                (strlit "match condition") (sh_bd_to_str eret.sh_bd) ctxt.loc ctxt.scope)
+        );
+      (* NamedB name fields *)
+      (* check exp is a variant of a union *)
+      (uname, variants) <-
+      (case eret.sh_bd of
+        NamedB name variants => return (name, variants)
+      | _ => error (ShapeErr $ get_non_word_msg
+        (strlit "match condition") (sh_bd_to_str eret.sh_bd) ctxt.loc ctxt.scope));
+      (*TODO clean up errors *)
+      case ALOOKUP ctxt.structs uname of
+        SOME (Union_info info) => return ()
+        | SOME (Struct_info info) =>  error (ShapeErr $ get_non_word_msg
+        (strlit "match condition") (sh_bd_to_str eret.sh_bd) ctxt.loc ctxt.scope)
+        | NONE =>  error (ShapeErr $ get_non_word_msg
+        (strlit "match condition") (sh_bd_to_str eret.sh_bd) ctxt.loc ctxt.scope);
+      ctxt' <<-  ctxt with <| match_exp := (T, uname) |>;
+      pret1 <- static_check_prog ctxt' prog1;
+      pret2 <- static_check_prog ctxt' prog2; (* Default case *)
+      (* TODO change this *)
+      return <|
+            exits_fun  := (pret1.exits_fun /\ pret2.exits_fun)
+          ; exits_loop := (pret1.exits_loop /\ pret2.exits_loop)
+          ; last       := OtherLast
+          ; var_delta  := empty mlstring$compare
+          ; curr_loc   := ctxt.loc
+          ; recurse    := F |>
+    od ∧
+  static_check_prog ctxt (CaseList progs) =
+  do
+    (* TODO do something about empty pret *)
+    arm_names <<- get_arm_names progs;
+    if ~(ALL_DISTINCT arm_names) then error (GenErr $ strlit "match condition variants duplicated")
+    else return ();
+    prets_rec <- static_check_case_progs ctxt progs;
+    prets <<- prets_rec.prog_rets;
+
+    return <|
+          exits_fun  := EVERY (λpr. pr.exits_fun) prets
+        ; exits_loop := EVERY (λpr. pr.exits_loop) prets
+        ; last       := (LAST prets).last (* TODO *)
+        ; var_delta  := empty mlstring$compare (*TODO *)
+        ; curr_loc   := (LAST prets).curr_loc
+        ; recurse    := EXISTS (λpr. pr.recurse) prets |>
+  od ∧
+  static_check_case_progs ctxt [] =
+    return <| prog_rets := [] |> ∧
+  static_check_case_progs ctxt (prog::progs) =
+    do
+      pret <- static_check_prog ctxt prog;
+      prets <- static_check_case_progs (ctxt with loc := pret.curr_loc) progs;
+      return <| prog_rets := pret::prets.prog_rets |>;
+    od ∧
+  static_check_prog ctxt (Case name var_name prog) =
+  do
+  (* check that name is an existing variant in union *)
+  (* Decl varname to the shape of that variant *)
+  (* assuming right now only vars allowed as scrutinised *)
+    (_,  uname) <<- ctxt.match_exp;
+
+    sh <- (case ALOOKUP ctxt.structs uname of
+      SOME (Union_info info) => (case ALOOKUP info.variants name of
+                                SOME (shape) => return shape
+                                | NONE => error (GenErr $ strlit "not a valid variant of the union"))
+      | _ => error (GenErr $ strlit "Unions not in scope, this should not happen"));
+
+    sh_bd <- (case sh_bd_from_sh ctxt.structs Trusted sh of
+      (* return exp info *)
+      | SOME sb => return sb
+      (* should never occur if static checker implemented correctly *)
+      | NONE => error (GenErr $ get_implementation_err_msg
+        (strlit "static analysis failed to convert in-scope shape")
+        ctxt.loc ctxt.scope));
+     ctxt' <<- ctxt with <|
+          locals := insert ctxt.locals var_name <| vsh_bd := sh_bd |>
+        ; last := OtherLast |>;
+      pret <- static_check_prog ctxt' prog;
+      return <|
+          exits_fun  := pret.exits_fun
+        ; exits_loop := pret.exits_loop
+        ; last       := pret.last
+        ; var_delta  := delete pret.var_delta var_name
+        ; curr_loc   := pret.curr_loc
+        ; recurse    := F |>
+  od ∧
+  static_check_prog ctxt (Default prog) =
+  do
+    pret <- static_check_prog ctxt prog;
+    return <|
+      exits_fun    := pret.exits_fun
+      ; exits_loop := pret.exits_loop
+      ; last       := pret.last
+      ; var_delta  := pret.var_delta
+      ; curr_loc   := pret.curr_loc
+      ; recurse    := pret.recurse
+    |>
+  od ∧
   static_check_prog ctxt (If exp prog1 prog2) =
     do
       (* check condition exp *)
@@ -1857,6 +2025,8 @@ Definition static_check_prog_def:
       ; var_delta  := empty mlstring$compare
       ; curr_loc   := loc
       ; recurse    := F |>
+Termination
+cheat
 End
 
 (*
@@ -1867,6 +2037,9 @@ Definition static_check_progs_def:
   static_check_progs fctxt gctxt sctxt ectxt [] =
     (* no more decls *)
     return () ∧
+  static_check_progs fctxt gctxt sctxt ectxt (UnionD _ _::decls) =
+    (* not a function *)
+    static_check_progs fctxt gctxt sctxt ectxt decls ∧
   static_check_progs fctxt gctxt sctxt ectxt (Name _ _::decls) =
     (* not a function *)
     static_check_progs fctxt gctxt sctxt ectxt decls ∧
@@ -1897,6 +2070,7 @@ Definition static_check_progs_def:
                 ; structs := sctxt
                 ; scope := FunScope fi.name (strlit "")
                 ; in_loop := F
+                ; match_exp := (F , strlit "") (* Bool, scrutinised term, union*)
                 ; is_reachable := IsReach
                 ; last := InvisLast
                 ; loc := «» |>;
@@ -1930,6 +2104,9 @@ Definition static_check_decls_def:
   static_check_decls fctxt gctxt sctxt ectxt (Name _ _::decls) =
     (* already processed *)
     static_check_decls fctxt gctxt sctxt ectxt decls ∧
+  static_check_decls fctxt gctxt sctxt ectxt (UnionD _ _::decls) =
+    (* already processed *)
+    static_check_decls fctxt gctxt sctxt ectxt decls ∧
   static_check_decls fctxt gctxt sctxt ectxt (Decl shape vname exp::decls) =
     do
       (* setup initial checking context *)
@@ -1940,6 +2117,7 @@ Definition static_check_decls_def:
                 ; structs := sctxt
                 ; scope := DeclScope vname
                 ; in_loop := F
+                ; match_exp := (F , strlit "")
                 ; is_reachable := IsReach
                 ; last := InvisLast
                 ; loc := «» |>;
@@ -2070,13 +2248,30 @@ Definition static_check_names_def:
       (* check field shapes *) (* TODO: decl locs *)
       check_id_shapes sctxt (strlit "") (StcScope name (strlit "")) flds;
       (* setup struct info *)
-      info <<- <| fields := flds
+      info <<- Struct_info <|
+                  fields := flds
                 ; size := size_of_sh_with_ctxt sctxt (Comb $ MAP SND flds) |>;
       (* check remaining names *)
       static_check_names ((name,info)::sctxt) decls
     od ∧
+    static_check_names sctxt (UnionD name flds::decls) =
+    do
+      case ALOOKUP sctxt name of
+      | SOME info =>
+        error (ScopeErr $ get_redec_msg Stc (strlit "") name TopLevel)
+      | NONE => return ();
+      case first_repeat $ sort mlstring_lt (MAP FST flds) of
+        SOME fld => error (ScopeErr $ concat [
+            strlit "field "; fld; strlit " is redeclared in union name ";
+            name; strlit "\n"])
+      | NONE => return ();
+      check_id_shapes sctxt (strlit "") (StcScope name (strlit "")) flds;
+      info <<- Union_info <| variants := flds
+                            ; size := size_of_union_with_ctxt sctxt (Comb $ MAP SND flds) |>;
+      static_check_names ((name,info)::sctxt) decls
+    od ∧
   static_check_names sctxt (_::decls) =
-    (* not a struct name *)
+    (* not a struct or union name *)
     static_check_names sctxt decls
 End
 
